@@ -1,4 +1,4 @@
-# P3DX---TANUH-
+# P3DX-TANUH
 
 You've built a valuable AI model and you want it run or evaluated on someone else's datasets and evaluation scripts and gauge it’s metrics against other models. But you don't want anyone — not even the people operating those servers — to ever see it. This system makes that possible by passing your model through a series of sealed, tamper-proof vaults, and here's how the whole journey of benchmarking unfolds.
 
