@@ -10,3 +10,20 @@ This Processing TEE is a fully equipped workspace — it even has the uv Python 
 
 Now the real work happens. The Processing TEE pulls in the right evaluator scripts based on the dataset chosen, and the encrypted data it needs is fetched in as well. To unlock that data, the vault fetches an identity token and hands it to a Secrets Manager — a gatekeeper that, once it verifies the token, releases the key needed to open the data. With the model, the scripts, and the data all assembled safely inside the sealed environment, the evaluation runs, and the results are gathered up. Finally, those results are populated onto a leaderboard, where you can filter the rankings across various metrics to see how things stack up. From start to finish, your model stays locked away from prying eyes — encrypted in transit, opened only inside vaults that have proven themselves trustworthy, kept on a leash by an auditable policy, and never exposed to the humans running the machines.
 
+
+## Repositories
+
+The TANUH repositories are linked here as git submodules. Clone with `git clone --recurse-submodules`, or run `git submodule update --init` after cloning.
+
+| Folder | Repository |
+|---|---|
+| [`TANUH-Buffer-TEE`](https://github.com/datakaveri/TANUH-Buffer-TEE) | RA-TLS submission enclave that receives encrypted models and dispatches benchmark jobs to the Processing TEE |
+| [`TANUH-Processing-TEE`](https://github.com/datakaveri/TANUH-Processing-TEE) | Confidential Space workload that decrypts datasets, runs models, adaptors and bucket evaluators, and submits results to the leaderboard |
+| [`p3dx-tanuh-buffertee-python`](https://github.com/datakaveri/p3dx-tanuh-buffertee-python) | Python Buffer TEE |
+| [`p3dx-tanuh-processingtee-python`](https://github.com/datakaveri/p3dx-tanuh-processingtee-python) | Python Processing TEE |
+
+## Proposals
+
+Changes kept for review and future reference, not merged into their repositories:
+
+- [`proposals/faster-dataset-upload`](proposals/faster-dataset-upload): faster dataset upload in `ui-dx` and `files-connect-api` (parallel uploads, batch and direct initiate, session-key encryption with one manifest per upload session).

@@ -1,0 +1,1633 @@
+diff --git a/apps/TANUH/src/app/shared/components/contribution-steps/upload/upload.component.ts b/apps/TANUH/src/app/shared/components/contribution-steps/upload/upload.component.ts
+index 531f2637..80f232b5 100644
+--- a/apps/TANUH/src/app/shared/components/contribution-steps/upload/upload.component.ts
++++ b/apps/TANUH/src/app/shared/components/contribution-steps/upload/upload.component.ts
+@@ -33,7 +33,7 @@ import {
+   buildTanuhDatasetItemPayload,
+   extractCreatedItemId,
+ } from '../../../utils/tanuh-dataset-item-payload.util';
+-import { EncryptedUploadService } from '../../../services/encrypted-upload.service';
++import { DatasetUploadService } from '../../../services/dataset-upload.service';
+ import { DatasetImageService } from '../../../../catalogue/reference-datasets/dataset-image.service';
+ import { environment } from '../../../../../environments/environment';
+ import {
+@@ -243,7 +243,7 @@ export class ProviderUploadComponent implements OnInit, AfterViewInit {
+     private catalogueApiService: CatalogueApiService,
+     private authApiService: AuthApiService,
+     private fileApiService: FileApiService,
+-    private encryptedUploadService: EncryptedUploadService,
++    private datasetUploadService: DatasetUploadService,
+     private datasetImageService: DatasetImageService,
+   ) {}
+ 
+@@ -1306,9 +1306,7 @@ if __name__ == "__main__":
+ 
+     console.log('Pending files to upload:', pendingFiles.length);
+ 
+-    for (const fileItem of pendingFiles) {
+-      await this.uploadSingleFile(fileItem);
+-    }
++    await this.uploadFileItems(pendingFiles);
+ 
+     this.uploading = false;
+ 
+@@ -1322,193 +1320,97 @@ if __name__ == "__main__":
+   }
+ 
+   /**
+-   * Upload a single file using multipart upload (5-step process).
+-   * `storageFileName` overrides the file's own name as the S3 object name, so a file can be given a
+-   * standardized name regardless of what the user's local file is called. Regular dataset files
+-   * omit it.
++   * Upload one file. `storageFileName` overrides the file's own name as the S3 object name, so a
++   * file can be given a standardized name regardless of what the user's local file is called.
++   * Regular dataset files omit it.
+    */
+   private async uploadSingleFile(
+     fileItem: (typeof this.uploadedFiles)[0],
+     storageFileName?: string,
+   ): Promise<void> {
+-    try {
++    await this.uploadFileItems([fileItem], storageFileName);
++  }
++
++  /**
++   * Upload files through DatasetUploadService: several at a time, small files initiated in
++   * batches as direct single-PUT uploads, and (environment.encryptedDatasetUpload) encrypted in
++   * the browser under one session key with one manifest written after the last file. Plain
++   * uploads still get a server preview; ciphertext cannot be previewed.
++   *
++   * The file list is no longer refreshed after every file: its response was never used here, and
++   * it cost one request per file.
++   */
++  private async uploadFileItems(
++    fileItems: Array<(typeof this.uploadedFiles)[0]>,
++    storageFileName?: string,
++  ): Promise<void> {
++    for (const fileItem of fileItems) {
+       fileItem.status = 'uploading';
+       fileItem.progress = 0;
+       fileItem.error = undefined;
++    }
+ 
+-      // Get databankId from localStorage
+-      const localStorageKey = this.getLocalStorageKey();
+-      const existingData = localStorage.getItem(localStorageKey);
+-      const formData = existingData ? JSON.parse(existingData) : {};
+-      const databankId = formData.itemId || formData.id || formData.item_id;
+-
+-      if (!databankId) {
+-        throw new Error(
++    // Get databankId from localStorage
++    const localStorageKey = this.getLocalStorageKey();
++    const existingData = localStorage.getItem(localStorageKey);
++    const formData = existingData ? JSON.parse(existingData) : {};
++    const databankId = formData.itemId || formData.id || formData.item_id;
++    if (!databankId) {
++      this.markUploadFailed(
++        fileItems,
++        new Error(
+           'Databank ID not found. Please complete previous steps first.',
+-        );
+-      }
+-
+-      const file = fileItem.file;
+-      const fileName = storageFileName ?? this.getFilePath(file);
+-
+-      if (environment.encryptedDatasetUpload) {
+-        await this.uploadSingleFileEncrypted(
+-          fileItem,
+-          databankId,
+-          file,
+-          fileName,
+-        );
+-        return;
+-      }
+-
+-      console.log('Starting 5-step upload process for:', fileName);
+-
+-      // ============================================
+-      // STEP 1: Initiate Upload
+-      // ============================================
+-      console.log('Step 1: Initiating upload...');
+-      const initiateResponse = await this.fileApiService.initiateUpload(
+-        databankId,
+-        fileName,
+-        file.type || 'application/octet-stream',
+-        1, // Single part upload
+-      );
+-
+-      console.log('Step 1 Complete - Upload initiated:', initiateResponse);
+-      console.log(
+-        'Response data structure:',
+-        JSON.stringify(initiateResponse.data, null, 2),
+-      );
+-
+-      // Handle nested response structure: { success: true, data: { uploadId, key, parts } }
+-      const responseData = initiateResponse.data.data || initiateResponse.data;
+-      const uploadId = responseData.uploadId;
+-
+-      // The response structure has parts array with presignedUrl
+-      const presignedUrls =
+-        responseData.parts?.map((part: any) => part.presignedUrl) || [];
+-
+-      console.log('Extracted uploadId:', uploadId);
+-      console.log('Extracted presigned URLs:', presignedUrls);
+-
+-      if (!presignedUrls || presignedUrls.length === 0) {
+-        console.error('Full response:', initiateResponse);
+-        throw new Error('No presigned URLs received from server');
+-      }
+-
+-      fileItem.progress = 10;
+-
+-      // ============================================
+-      // STEP 2: Upload to S3/MinIO (Presigned URL)
+-      // ============================================
+-      console.log('Step 2: Uploading file to S3/MinIO...');
+-      const uploadResponse = await this.fileApiService.uploadPart(
+-        presignedUrls[0],
+-        file,
+-      );
+-
+-      console.log('Step 2 Complete - File uploaded to S3:', uploadResponse);
+-
+-      const etag = uploadResponse.headers.get('ETag')?.replace(/"/g, '') || '';
+-
+-      if (!etag) {
+-        throw new Error('No ETag received from S3 upload');
+-      }
+-
+-      fileItem.progress = 40;
+-
+-      // ============================================
+-      // STEP 3: Complete Upload
+-      // ============================================
+-      console.log('Step 3: Completing upload...');
+-      const completeResponse = await this.fileApiService.completeUpload(
+-        databankId,
+-        uploadId,
+-        fileName,
+-        [{ partNumber: 1, eTag: etag }],
++        ),
+       );
++      return;
++    }
+ 
+-      console.log('Step 3 Complete - Upload completed:', completeResponse);
+-      fileItem.progress = 60;
++    // Each upload item carries the row it updates.
++    const items = fileItems.map((row) => ({
++      file: row.file,
++      key: storageFileName ?? this.getFilePath(row.file),
++      row,
++    }));
+ 
+-      // ============================================
+-      // STEP 4: Refresh File List
+-      // ============================================
+-      console.log('Step 4: Refreshing file list...');
+-      const fileListResponse = await this.fileApiService.listFiles(
++    const encrypted = !!environment.encryptedDatasetUpload;
++    try {
++      await this.datasetUploadService.uploadFiles(
+         databankId,
+-        1000,
+-        true,
++        items,
++        { encrypted, preview: !encrypted },
++        {
++          onProgress: (item, pct) => {
++            item.row.progress = pct;
++          },
++          onDone: (item, result) => {
++            const fileItem = item.row;
++            fileItem.key = item.key;
++            fileItem.uploadId = result.uploadId;
++            fileItem.previewData = result.previewData;
++            fileItem.progress = 100;
++            fileItem.status = 'completed';
++          },
++          onError: (item, error) => this.markUploadFailed([item.row], error),
++        },
+       );
+-
+-      console.log('Step 4 Complete - File list refreshed:', fileListResponse);
+-      fileItem.progress = 80;
+-
+-      // ============================================
+-      // STEP 5: Generate File Preview
+-      // ============================================
+-      console.log('Step 5: Generating file preview...');
+-      const previewResponse = await this.fileApiService.generatePreview(
+-        databankId,
+-        fileName,
++    } catch (error) {
++      // Failed before or after the per-file uploads (encryption key fetch, session manifest).
++      this.markUploadFailed(
++        fileItems.filter((f) => f.status !== 'error'),
++        error,
+       );
++    }
++  }
+ 
+-      console.log('Step 5 Complete - Preview generated:', previewResponse);
+-
+-      // Store preview data and upload metadata in the file item
+-      fileItem.previewData = previewResponse.data;
+-      fileItem.uploadId = uploadId;
+-      fileItem.key = fileName;
+-
+-      fileItem.progress = 100;
+-      fileItem.status = 'completed';
+-
+-      console.log('✅ All 5 steps completed successfully for:', fileName);
+-    } catch (error: any) {
++  private markUploadFailed(
++    fileItems: Array<(typeof this.uploadedFiles)[0]>,
++    error: unknown,
++  ): void {
++    for (const fileItem of fileItems) {
+       fileItem.status = 'error';
+       fileItem.error = this.getUserFriendlyErrorMessage(error);
+-      console.error('Upload error:', error);
+     }
+-  }
+-
+-  /**
+-   * Encrypted upload path (environment.encryptedDatasetUpload): the file is
+-   * chunked and AES-256-GCM-encrypted in the browser, chunks are uploaded as
+-   * multipart parts, the fileserver composes them in order, and a manifest
+-   * sidecar (KMS-wrapped DEK + decryption parameters for the TEE) is stored
+-   * next to the object. Ciphertext cannot be previewed, so the preview step
+-   * is skipped.
+-   */
+-  private async uploadSingleFileEncrypted(
+-    fileItem: (typeof this.uploadedFiles)[0],
+-    databankId: string,
+-    file: File,
+-    fileName: string,
+-  ): Promise<void> {
+-    console.log('Starting encrypted chunked upload for:', fileName);
+-
+-    // Chunk encryption + part uploads map to 0–85%.
+-    const manifest = await this.encryptedUploadService.uploadEncryptedFile(
+-      databankId,
+-      fileName,
+-      file,
+-      (pct) => {
+-        fileItem.progress = Math.round(pct * 0.85);
+-      },
+-    );
+-    console.log(
+-      `Encrypted upload composed (${manifest.total_chunks} chunks), manifest stored`,
+-    );
+-    fileItem.progress = 90;
+-
+-    await this.fileApiService.listFiles(databankId, 1000, true);
+-
+-    // No preview: the stored object is ciphertext.
+-    fileItem.previewData = undefined;
+-    fileItem.key = fileName;
+-    fileItem.progress = 100;
+-    fileItem.status = 'completed';
+-    console.log('✅ Encrypted upload completed for:', fileName);
++    console.error('Upload error:', error);
+   }
+ 
+   /**
+diff --git a/apps/TANUH/src/app/shared/components/manage-files-modal/manage-files-modal.component.ts b/apps/TANUH/src/app/shared/components/manage-files-modal/manage-files-modal.component.ts
+index 420a5b6c..2d107c9f 100644
+--- a/apps/TANUH/src/app/shared/components/manage-files-modal/manage-files-modal.component.ts
++++ b/apps/TANUH/src/app/shared/components/manage-files-modal/manage-files-modal.component.ts
+@@ -22,6 +22,7 @@ import { SingleSelectComponent } from '../primeng/single-select/single-select.co
+ import { ModalComponent } from '../primeng/modal/modal.component';
+ import { ToasterService } from '../../../services/toaster.service';
+ import { DatasetVersionFileService } from '../../services/dataset-version-file.service';
++import { DatasetUploadService } from '../../services/dataset-upload.service';
+ import {
+   DatasetVersionTag,
+   extractDatasetVersionMetadata,
+@@ -169,6 +170,7 @@ export class ManageFilesModalComponent implements OnChanges, AfterViewInit {
+ 
+   constructor(
+     private versionFileService: DatasetVersionFileService,
++    private datasetUploadService: DatasetUploadService,
+     private catalogueApiService: CatalogueApiService,
+     private toasterService: ToasterService,
+   ) {}
+@@ -662,9 +664,7 @@ export class ManageFilesModalComponent implements OnChanges, AfterViewInit {
+     const pending = this.uploadedFiles.filter(
+       (f) => f.status === 'pending' || f.status === 'error',
+     );
+-    for (const fileItem of pending) {
+-      await this.uploadSingleFile(fileItem);
+-    }
++    await this.uploadFileItems(pending);
+     this.uploading = false;
+ 
+     if (this.isAllCompleted()) {
+@@ -673,10 +673,8 @@ export class ManageFilesModalComponent implements OnChanges, AfterViewInit {
+   }
+ 
+   /**
+-   * Uploads one file, scoped to the active version. When `environment.encryptedDatasetUpload`
+-   * is on, delegates to the same client-side AES-256-GCM chunked + KMS-wrapped-DEK flow used by
+-   * the onboarding "Upload files" step (`EncryptedUploadService`, via the wrapper); otherwise
+-   * uses the plain 5-step multipart flow. Shared by dataset files and ground truth — both go through the same encryption path, matching the onboarding flow.
++   * Uploads one file, scoped to the active version. Shared by dataset files and ground truth —
++   * both go through the same path, matching the onboarding flow.
+    *
+    * `storageFileName` overrides the file's own name as the S3 object name — used to give
+    * ground truth a standardized name regardless of what the user's local
+@@ -687,86 +685,70 @@ export class ManageFilesModalComponent implements OnChanges, AfterViewInit {
+     fileItem: UploadedFileItem,
+     storageFileName?: string,
+   ): Promise<void> {
+-    try {
+-      fileItem.status = 'uploading';
+-      fileItem.progress = 0;
+-      fileItem.error = undefined;
+-
+-      const versionTag = this.activeVersionTag.trim() || null;
+-      const file = fileItem.file;
+-      const fileName = storageFileName ?? this.getFilePath(file);
+-
+-      if (this.encryptedUploadEnabled) {
+-        await this.versionFileService.uploadEncryptedFile(
+-          this.itemId,
+-          versionTag,
+-          fileName,
+-          file,
+-          (pct) => {
+-            fileItem.progress = Math.round(pct * 0.85);
+-          },
+-        );
+-        fileItem.progress = 90;
+-        await this.versionFileService.listVersionFiles(this.itemId, versionTag);
+-        fileItem.progress = 100;
+-        fileItem.status = 'completed';
+-        fileItem.key = this.versionFileService.buildVersionedKey(
+-          versionTag,
+-          fileName,
+-        );
+-        return;
+-      }
+-
+-      const initiateResponse = await this.versionFileService.initiateUpload(
+-        this.itemId,
+-        versionTag,
+-        fileName,
+-        file.type || 'application/octet-stream',
+-      );
+-      const responseData = initiateResponse.data?.data ?? initiateResponse.data;
+-      const uploadId = responseData?.uploadId;
+-      const presignedUrls =
+-        responseData?.parts?.map((p: any) => p.presignedUrl) ?? [];
+-      if (!uploadId || presignedUrls.length === 0) {
+-        throw new Error('No presigned URLs received from server');
+-      }
+-      fileItem.progress = 10;
+-
+-      const uploadResponse = await this.versionFileService.uploadPart(
+-        presignedUrls[0],
+-        file,
+-      );
+-      const etag = uploadResponse.headers.get('ETag')?.replace(/"/g, '') ?? '';
+-      if (!etag) {
+-        throw new Error('No ETag received from storage upload');
+-      }
+-      fileItem.progress = 40;
+-
+-      await this.versionFileService.completeUpload(
+-        this.itemId,
+-        uploadId,
+-        versionTag,
+-        fileName,
+-        [{ partNumber: 1, eTag: etag }],
+-      );
+-      fileItem.progress = 60;
++    await this.uploadFileItems([fileItem], storageFileName);
++  }
+ 
+-      await this.versionFileService.generatePreview(
+-        this.itemId,
+-        versionTag,
+-        fileName,
+-      );
+-      fileItem.progress = 100;
+-      fileItem.status = 'completed';
+-      fileItem.uploadId = uploadId;
+-      fileItem.key = this.versionFileService.buildVersionedKey(
+-        versionTag,
+-        fileName,
+-      );
+-    } catch (error: any) {
++  /**
++   * Uploads files to the active version through `DatasetUploadService`, the same path as the
++   * onboarding "Upload files" step: several files at a time, small files initiated in batches as
++   * direct single-PUT uploads, and, when `environment.encryptedDatasetUpload` is on, client-side
++   * AES-256-GCM encryption under one session key with one manifest written after the last file.
++   * Plain uploads still ask the server for a preview.
++   *
++   * The version's file list is no longer re-fetched after every encrypted file: the response was
++   * never used here, and it cost one request per file.
++   */
++  private async uploadFileItems(
++    fileItems: UploadedFileItem[],
++    storageFileName?: string,
++  ): Promise<void> {
++    const versionTag = this.activeVersionTag.trim() || null;
++
++    // Each upload item carries the row it updates; keys carry the version prefix.
++    const items = fileItems.map((row) => {
++      row.status = 'uploading';
++      row.progress = 0;
++      row.error = undefined;
++      const fileName = storageFileName ?? this.getFilePath(row.file);
++      return {
++        file: row.file,
++        key: this.versionFileService.buildVersionedKey(versionTag, fileName),
++        row,
++      };
++    });
++    const fail = (fileItem: UploadedFileItem, error: any) => {
+       fileItem.status = 'error';
+       fileItem.error = error?.message ?? 'Upload failed. Please try again.';
+       console.error('Upload error:', error);
++    };
++
++    try {
++      await this.datasetUploadService.uploadFiles(
++        this.itemId,
++        items,
++        {
++          encrypted: this.encryptedUploadEnabled,
++          preview: !this.encryptedUploadEnabled,
++        },
++        {
++          onProgress: (item, pct) => {
++            item.row.progress = pct;
++          },
++          onDone: (item, result) => {
++            const fileItem = item.row;
++            fileItem.key = item.key;
++            fileItem.uploadId = result.uploadId;
++            fileItem.progress = 100;
++            fileItem.status = 'completed';
++          },
++          onError: (item, error) => fail(item.row, error),
++        },
++      );
++    } catch (error) {
++      // Failed before or after the per-file uploads (encryption key fetch, session manifest).
++      fileItems
++        .filter((f) => f.status !== 'error')
++        .forEach((f) => fail(f, error));
+     }
+   }
+ 
+diff --git a/apps/TANUH/src/app/shared/services/dataset-upload.service.ts b/apps/TANUH/src/app/shared/services/dataset-upload.service.ts
+new file mode 100644
+index 00000000..115d8ee6
+--- /dev/null
++++ b/apps/TANUH/src/app/shared/services/dataset-upload.service.ts
+@@ -0,0 +1,267 @@
++import { Injectable } from '@angular/core';
++import { FileApiService } from '@angular-workspace/services';
++import {
++  EncryptedUploadService,
++  InitiatedUpload,
++} from './encrypted-upload.service';
++import type { EncryptionSession } from '../../../lib/encrypted-dataset-upload';
++
++/** Files uploading at the same time. Small files are bound by round trips, not bandwidth. */
++export const FILE_UPLOAD_CONCURRENCY = 6;
++/** Single-part files initiated per request (POST /uploads/batch accepts up to 100). */
++export const INITIATE_BATCH_SIZE = 20;
++
++export interface DatasetUploadItem {
++  file: File;
++  /** Object key relative to the databank (already version-prefixed where needed) */
++  key: string;
++}
++
++/** Callbacks get back the caller's own item objects, so extra fields (e.g. the UI row) ride along. */
++export interface DatasetUploadCallbacks<
++  T extends DatasetUploadItem = DatasetUploadItem,
++> {
++  /** The file's upload started (its URLs are ready) */
++  onStart?: (item: T) => void;
++  /** 0–100 for one file */
++  onProgress?: (item: T, pct: number) => void;
++  /** The file is stored. `uploadId` is set for multipart uploads (needed to cancel), `previewData` for plain uploads. */
++  onDone?: (item: T, result: { uploadId?: string; previewData?: any }) => void;
++  onError?: (item: T, error: unknown) => void;
++}
++
++export interface DatasetUploadOptions {
++  /** Client-side encryption (environment.encryptedDatasetUpload) */
++  encrypted: boolean;
++  /** Plain uploads: ask the server for a preview of each file after it is stored */
++  preview: boolean;
++}
++
++/** A file whose upload URLs are ready (or whose initiation failed). */
++interface ReadyFile<T extends DatasetUploadItem> {
++  item: T;
++  numParts: number;
++  upload?: InitiatedUpload;
++  error?: unknown;
++}
++
++/**
++ * Uploads a set of dataset files to one databank, shared by the onboarding
++ * "Upload files" step and the "Manage files" modal:
++ *
++ * - FILE_UPLOAD_CONCURRENCY files upload at the same time (it used to be one).
++ * - Files that fit in one part are initiated INITIATE_BATCH_SIZE at a time
++ *   with one request, as direct uploads: one presigned PUT straight to the
++ *   final object, with no complete call. The next batch is initiated while the
++ *   current one uploads. Larger files are initiated one by one as multipart.
++ * - The file list is not refreshed after every file; callers refresh once
++ *   when uploadFiles() resolves.
++ * - Encrypted: one encryption session for the whole call; its manifest is
++ *   written after the last file (EncryptedUploadService.finishSession).
++ * - Plain: one whole-file PUT, complete (unless direct), then the preview.
++ *
++ * Per-file failures are reported through onError and do not stop the others.
++ */
++@Injectable({ providedIn: 'root' })
++export class DatasetUploadService {
++  constructor(
++    private fileApiService: FileApiService,
++    private encryptedUploadService: EncryptedUploadService,
++  ) {}
++
++  async uploadFiles<T extends DatasetUploadItem>(
++    databankId: string,
++    items: T[],
++    options: DatasetUploadOptions,
++    callbacks: DatasetUploadCallbacks<T> = {},
++  ): Promise<void> {
++    if (items.length === 0) {
++      return;
++    }
++    const session = options.encrypted
++      ? await this.encryptedUploadService.startSession()
++      : null;
++    const numParts = (file: File) =>
++      options.encrypted ? this.encryptedUploadService.partCount(file) : 1;
++
++    // Single-part files go in batches; each multipart file is its own "batch".
++    const batches: T[][] = [];
++    let small: T[] = [];
++    for (const item of items) {
++      if (numParts(item.file) > 1) {
++        batches.push([item]);
++      } else {
++        small.push(item);
++        if (small.length === INITIATE_BATCH_SIZE) {
++          batches.push(small);
++          small = [];
++        }
++      }
++    }
++    if (small.length) {
++      batches.push(small);
++    }
++
++    // Workers pull initiated files from one stream; the stream initiates the
++    // next batch while the workers upload the current one.
++    const initiateBatch = (batch: T[]) =>
++      this.initiate(databankId, batch, numParts);
++    async function* readyFiles(): AsyncGenerator<ReadyFile<T>> {
++      let next: Promise<ReadyFile<T>[]> | null = initiateBatch(batches[0]);
++      for (let b = 0; next; b++) {
++        const ready: ReadyFile<T>[] = await next;
++        next = b + 1 < batches.length ? initiateBatch(batches[b + 1]) : null;
++        yield* ready;
++      }
++    }
++    const stream = readyFiles();
++    const worker = async () => {
++      for (let r = await stream.next(); !r.done; r = await stream.next()) {
++        await this.uploadOne(databankId, r.value, session, options, callbacks);
++      }
++    };
++    await Promise.all(
++      Array.from(
++        { length: Math.min(FILE_UPLOAD_CONCURRENCY, items.length) },
++        worker,
++      ),
++    );
++
++    if (session) {
++      await this.encryptedUploadService.finishSession(databankId, session);
++    }
++  }
++
++  /**
++   * Initiate a batch: one request for single-part files (as direct uploads), a
++   * normal multipart initiate for a large file. A failed initiation is kept on
++   * the file and reported when a worker picks it up.
++   */
++  private async initiate<T extends DatasetUploadItem>(
++    databankId: string,
++    batch: T[],
++    numParts: (file: File) => number,
++  ): Promise<ReadyFile<T>[]> {
++    const requests = batch.map((item) => ({
++      key: item.key,
++      contentType: item.file.type || 'application/octet-stream',
++      numParts: numParts(item.file),
++      direct: numParts(item.file) === 1,
++    }));
++    try {
++      if (batch.length === 1) {
++        const r = requests[0];
++        const response = await this.fileApiService.initiateUpload(
++          databankId,
++          r.key,
++          r.contentType,
++          r.numParts,
++          { direct: r.direct },
++        );
++        return [
++          {
++            item: batch[0],
++            numParts: r.numParts,
++            upload: toInitiated(response.data),
++          },
++        ];
++      }
++      const response = await this.fileApiService.initiateUploadsBatch(
++        databankId,
++        requests,
++      );
++      const uploads: any[] =
++        (response.data?.data ?? response.data)?.uploads ?? [];
++      return batch.map((item, i) => {
++        try {
++          return {
++            item,
++            numParts: requests[i].numParts,
++            upload: toInitiated(uploads[i]),
++          };
++        } catch (error) {
++          return { item, numParts: requests[i].numParts, error };
++        }
++      });
++    } catch (error) {
++      return batch.map((item, i) => ({
++        item,
++        numParts: requests[i].numParts,
++        error,
++      }));
++    }
++  }
++
++  private async uploadOne<T extends DatasetUploadItem>(
++    databankId: string,
++    ready: ReadyFile<T>,
++    session: EncryptionSession | null,
++    options: DatasetUploadOptions,
++    callbacks: DatasetUploadCallbacks<T>,
++  ): Promise<void> {
++    const { item, upload } = ready;
++    try {
++      if (ready.error || !upload) {
++        throw (
++          ready.error ?? new Error('No presigned URLs received from server')
++        );
++      }
++      callbacks.onStart?.(item);
++      const progress = (pct: number) => callbacks.onProgress?.(item, pct);
++      // Only multipart uploads have staged parts that can be cancelled later.
++      const uploadId = upload.direct ? undefined : upload.uploadId;
++
++      if (session) {
++        // Chunk uploads map to 0–95%; the rest is complete.
++        await this.encryptedUploadService.uploadEncryptedFile(
++          databankId,
++          session,
++          item.key,
++          item.file,
++          upload,
++          (pct) => progress(Math.round(pct * 0.95)),
++        );
++        callbacks.onDone?.(item, { uploadId });
++        return;
++      }
++
++      const uploadResponse = await this.fileApiService.uploadPart(
++        upload.parts[0].presignedUrl,
++        item.file,
++      );
++      const eTag = uploadResponse.headers.get('ETag')?.replace(/"/g, '') || '';
++      if (!eTag) {
++        throw new Error('No ETag received from storage upload');
++      }
++      progress(60);
++      if (!upload.direct) {
++        await this.fileApiService.completeUpload(
++          databankId,
++          upload.uploadId,
++          item.key,
++          [{ partNumber: 1, eTag }],
++        );
++      }
++      progress(80);
++      const previewData = options.preview
++        ? (await this.fileApiService.generatePreview(databankId, item.key)).data
++        : undefined;
++      callbacks.onDone?.(item, { uploadId, previewData });
++    } catch (error) {
++      callbacks.onError?.(item, error);
++    }
++  }
++}
++
++/** Normalize an initiate response ({ success, data: {...} } or the bare object). */
++function toInitiated(raw: any): InitiatedUpload {
++  const data = raw?.data && raw?.data?.uploadId !== undefined ? raw.data : raw;
++  if (!data?.uploadId || !data?.parts?.length) {
++    throw new Error('No presigned URLs received from server');
++  }
++  return {
++    uploadId: data.uploadId,
++    parts: data.parts,
++    direct: data.direct === true,
++  };
++}
+diff --git a/apps/TANUH/src/app/shared/services/dataset-version-file.service.ts b/apps/TANUH/src/app/shared/services/dataset-version-file.service.ts
+index f930877d..444642e4 100644
+--- a/apps/TANUH/src/app/shared/services/dataset-version-file.service.ts
++++ b/apps/TANUH/src/app/shared/services/dataset-version-file.service.ts
+@@ -1,7 +1,5 @@
+ import { Injectable } from '@angular/core';
+ import { FileApiService } from '@angular-workspace/services';
+-import { EncryptedUploadService } from './encrypted-upload.service';
+-import type { EncryptedDatasetManifest } from '../../../lib/encrypted-dataset-upload';
+ 
+ /**
+  * TANUH-local wrapper around the shared `FileApiService`.
+@@ -16,10 +14,7 @@ import type { EncryptedDatasetManifest } from '../../../lib/encrypted-dataset-up
+  */
+ @Injectable({ providedIn: 'root' })
+ export class DatasetVersionFileService {
+-  constructor(
+-    private fileApiService: FileApiService,
+-    private encryptedUploadService: EncryptedUploadService,
+-  ) {}
++  constructor(private fileApiService: FileApiService) {}
+ 
+   buildVersionedKey(versionTag: string | null, fileName: string): string {
+     const v = (versionTag ?? '').trim();
+@@ -116,26 +111,6 @@ export class DatasetVersionFileService {
+     });
+   }
+ 
+-  /**
+-   * Client-side-encrypted upload (same AES-256-GCM chunked + KMS-wrapped-DEK flow used by the
+-   * onboarding upload step), scoped to a version via the same `buildVersionedKey` used by the
+-   * plain upload path above.
+-   */
+-  async uploadEncryptedFile(
+-    databankId: string,
+-    versionTag: string | null,
+-    fileName: string,
+-    file: File,
+-    onProgress?: (pct: number) => void,
+-  ): Promise<EncryptedDatasetManifest> {
+-    return this.encryptedUploadService.uploadEncryptedFile(
+-      databankId,
+-      this.buildVersionedKey(versionTag, fileName),
+-      file,
+-      onProgress,
+-    );
+-  }
+-
+   /**
+    * Whole-databank scope: `processDatabank` (and the zip/report workers behind it) recursively
+    * scan the entire `databankId` prefix, so publishing always reprocesses all versions combined.
+diff --git a/apps/TANUH/src/app/shared/services/encrypted-upload.service.ts b/apps/TANUH/src/app/shared/services/encrypted-upload.service.ts
+index 65649edd..09b444fb 100644
+--- a/apps/TANUH/src/app/shared/services/encrypted-upload.service.ts
++++ b/apps/TANUH/src/app/shared/services/encrypted-upload.service.ts
+@@ -3,10 +3,14 @@ import { HttpClient } from '@angular/common/http';
+ import { firstValueFrom } from 'rxjs';
+ import { FileApiService, FILE_BASE_URL } from '@angular-workspace/services';
+ import {
++  addFileToSession,
++  beginEncryptedFile,
++  createEncryptionSession,
+   encryptAndUploadChunks,
+   encryptedPartCount,
+   manifestKeyFor,
+-  EncryptedDatasetManifest,
++  sessionManifest,
++  EncryptionSession,
+ } from '../../../lib/encrypted-dataset-upload';
+ 
+ export interface EncryptionPublicKey {
+@@ -15,19 +19,32 @@ export interface EncryptionPublicKey {
+   algorithm: string;
+ }
+ 
++/** An initiated upload: presigned URL(s) and, for multipart, the upload ID to complete. */
++export interface InitiatedUpload {
++  uploadId: string;
++  parts: Array<{ partNumber: number; presignedUrl: string }>;
++  /** Single PUT to the final object; there is nothing to complete or cancel */
++  direct?: boolean;
++}
++
++/** Parts of one file uploading at the same time; the next part is encrypted meanwhile. */
++export const ENCRYPTED_PARTS_IN_FLIGHT = 3;
++
+ /**
+- * Client-side-encrypted dataset upload through the existing files-connect-api
+- * presigned multipart flow:
++ * Client-side-encrypted dataset upload through files-connect-api presigned
++ * uploads (format: lib/encrypted-dataset-upload.ts):
+  *
+- *   1. GET  /v1/encryption/public-key            (KMS public key for DEK wrapping)
+- *   2. POST /v1/databanks/{id}/uploads           (numParts = ceil(size / 16 MB))
+- *   3. PUT  each AES-256-GCM-encrypted chunk to its presigned part URL
+- *   4. PUT  /v1/databanks/{id}/uploads/{uploadId} (server composes parts in order)
+- *   5. Upload `${key}.manifest.json` sidecar (single-part, same flow) — written
+- *      only after complete succeeds, so a missing manifest means "not finalized"
++ *   1. startSession(): GET /v1/encryption/public-key, then one random key for
++ *      the whole upload session, wrapped once with the KMS public key
++ *   2. uploadEncryptedFile() per file, after the caller initiated it (alone or in
++ *      a batch): encrypt 16 MB chunks, PUT up to 3 at a time, then complete
++ *      (skipped for direct single-PUT uploads)
++ *   3. finishSession(): upload `_tanuh/manifest-<session>.json` with the wrapped
++ *      key and every file that made it. Written last, so a missing manifest
++ *      means "not finalized".
+  *
+- * The composed object is ciphertext; only the TEE (via KMS asymmetricDecrypt on
+- * the manifest's wrapped DEK) can decrypt it. No preview is possible.
++ * The stored objects are ciphertext; only the TEE (via KMS asymmetricDecrypt of
++ * the manifest's wrapped key) can decrypt them. No preview is possible.
+  */
+ @Injectable({ providedIn: 'root' })
+ export class EncryptedUploadService {
+@@ -42,7 +59,7 @@ export class EncryptedUploadService {
+     @Inject(FILE_BASE_URL) private fileBaseUrl: string,
+   ) {}
+ 
+-  /** Fetch (and briefly cache) the platform's DEK-wrapping public key. */
++  /** Fetch (and briefly cache) the platform's key-wrapping public key. */
+   async getEncryptionPublicKey(): Promise<EncryptionPublicKey> {
+     const TTL_MS = 5 * 60 * 1000;
+     if (
+@@ -63,43 +80,48 @@ export class EncryptedUploadService {
+     return value;
+   }
+ 
++  /** Start an upload session: one key for all of its files, wrapped once. */
++  async startSession(): Promise<EncryptionSession> {
++    const publicKey = await this.getEncryptionPublicKey();
++    return createEncryptionSession(
++      publicKey.publicKeyPem,
++      publicKey.kmsKeyVersion,
++    );
++  }
++
++  /** Parts to request when initiating an encrypted upload of `file` (16 MB each). */
++  partCount(file: File): number {
++    return encryptedPartCount(file.size);
++  }
++
+   /**
+-   * Encrypt and upload one file under `key`, then upload its manifest sidecar.
+-   * Returns the manifest. `onProgress` reports 0–100 across chunk uploads.
++   * Encrypt and upload one file that the caller already initiated with
++   * partCount(file) parts. On success the file is added to the session, so the
++   * session manifest lists it. `onProgress` reports 0–100 across chunk uploads.
+    */
+   async uploadEncryptedFile(
+     databankId: string,
++    session: EncryptionSession,
+     key: string,
+     file: File,
++    upload: InitiatedUpload,
+     onProgress?: (pct: number) => void,
+-  ): Promise<EncryptedDatasetManifest> {
+-    const publicKey = await this.getEncryptionPublicKey();
+-    const numParts = encryptedPartCount(file.size);
+-
+-    const initiateResponse = await this.fileApiService.initiateUpload(
+-      databankId,
+-      key,
+-      'application/octet-stream',
+-      numParts,
+-    );
+-    const responseData = initiateResponse.data.data || initiateResponse.data;
+-    const uploadId: string = responseData.uploadId;
+-    const parts: Array<{ partNumber: number; presignedUrl: string }> =
+-      responseData.parts || [];
+-    if (!uploadId || parts.length < numParts) {
++  ): Promise<void> {
++    const encrypted = beginEncryptedFile(session, key, file.size);
++    if (upload.parts.length < encrypted.totalChunks) {
+       throw new Error(
+-        `Upload initiation returned ${parts.length}/${numParts} part URLs`,
++        `Upload initiation returned ${upload.parts.length}/${encrypted.totalChunks} part URLs`,
+       );
+     }
+ 
+-    const completedParts: Array<{ partNumber: number; eTag: string }> = [];
+     try {
+-      const manifest = await encryptAndUploadChunks({
++      const etags = await encryptAndUploadChunks({
++        session,
+         file,
+-        publicKeyPem: publicKey.publicKeyPem,
+-        kmsKeyVersion: publicKey.kmsKeyVersion,
++        encrypted,
++        partsInFlight: ENCRYPTED_PARTS_IN_FLIGHT,
+         putPart: async (chunkIndex, bytes) => {
+-          const part = parts[chunkIndex];
++          const part = upload.parts[chunkIndex];
+           const uploadResponse = await this.fileApiService.uploadPart(
+             part.presignedUrl,
+             new Blob([bytes as BlobPart], { type: 'application/octet-stream' }),
+@@ -110,38 +132,51 @@ export class EncryptedUploadService {
+           if (!eTag) {
+             throw new Error(`No ETag received for part ${part.partNumber}`);
+           }
+-          completedParts[chunkIndex] = { partNumber: part.partNumber, eTag };
++          return eTag;
+         },
+         ...(onProgress ? { onProgress } : {}),
+       });
+ 
+-      await this.fileApiService.completeUpload(
+-        databankId,
+-        uploadId,
+-        key,
+-        completedParts,
+-      );
+-      await this.uploadManifest(databankId, key, manifest);
+-      return manifest;
++      // A direct upload is already the final object; multipart parts are composed by complete.
++      if (!upload.direct) {
++        await this.fileApiService.completeUpload(
++          databankId,
++          upload.uploadId,
++          key,
++          etags,
++        );
++      }
++      addFileToSession(session, encrypted);
+     } catch (err) {
+       // Best-effort cleanup of staged parts; the original error is what matters.
+-      try {
+-        await this.fileApiService.cancelUpload(databankId, uploadId, key);
+-      } catch {
+-        /* staging objects are also cleaned by any later re-upload */
++      if (!upload.direct) {
++        try {
++          await this.fileApiService.cancelUpload(
++            databankId,
++            upload.uploadId,
++            key,
++          );
++        } catch {
++          /* staging objects are also cleaned by any later re-upload */
++        }
+       }
+       throw err;
+     }
+   }
+ 
+-  /** Upload the manifest sidecar as an ordinary single-part object. */
+-  private async uploadManifest(
++  /**
++   * Write the session manifest, listing every file that finished uploading.
++   * Nothing is written when no file made it. Returns the manifest's key, or null.
++   */
++  async finishSession(
+     databankId: string,
+-    objectKey: string,
+-    manifest: EncryptedDatasetManifest,
+-  ): Promise<void> {
+-    const key = manifestKeyFor(objectKey);
+-    const body = new Blob([JSON.stringify(manifest, null, 2)], {
++    session: EncryptionSession,
++  ): Promise<string | null> {
++    if (session.files.length === 0) {
++      return null;
++    }
++    const key = manifestKeyFor(session);
++    const body = new Blob([JSON.stringify(sessionManifest(session), null, 2)], {
+       type: 'application/json',
+     });
+ 
+@@ -150,11 +185,11 @@ export class EncryptedUploadService {
+       key,
+       'application/json',
+       1,
++      { direct: true },
+     );
+     const responseData = initiateResponse.data.data || initiateResponse.data;
+-    const uploadId: string = responseData.uploadId;
+     const presignedUrl: string = responseData.parts?.[0]?.presignedUrl;
+-    if (!uploadId || !presignedUrl) {
++    if (!presignedUrl) {
+       throw new Error('Manifest upload initiation returned no presigned URL');
+     }
+ 
+@@ -165,13 +200,16 @@ export class EncryptedUploadService {
+         headers: { 'Content-Type': 'application/json' },
+       },
+     );
+-    const eTag = uploadResponse.headers.get('ETag')?.replace(/"/g, '') || '';
+-    if (!eTag) {
+-      throw new Error('No ETag received for manifest upload');
++    if (!responseData.direct) {
++      // Server without direct uploads: it returned an ordinary single-part upload.
++      const eTag = uploadResponse.headers.get('ETag')?.replace(/"/g, '') || '';
++      await this.fileApiService.completeUpload(
++        databankId,
++        responseData.uploadId,
++        key,
++        [{ partNumber: 1, eTag }],
++      );
+     }
+-
+-    await this.fileApiService.completeUpload(databankId, uploadId, key, [
+-      { partNumber: 1, eTag },
+-    ]);
++    return key;
+   }
+ }
+diff --git a/apps/TANUH/src/lib/encrypted-dataset-upload.ts b/apps/TANUH/src/lib/encrypted-dataset-upload.ts
+index e9ebe0d7..b635c39b 100644
+--- a/apps/TANUH/src/lib/encrypted-dataset-upload.ts
++++ b/apps/TANUH/src/lib/encrypted-dataset-upload.ts
+@@ -1,86 +1,107 @@
+ /**
+  * Encrypted, chunked dataset upload — client-side envelope encryption
+- * (schema "tanuh-enc-dataset-v1"):
++ * (schema "tanuh-enc-dataset-v2"):
+  *
+- * 1. SHA-256 hash the plaintext file in 16 MB streaming chunks
+- * 2. Generate a random per-file AES-256-GCM DEK; wrap it with the platform's
+- *    Cloud KMS RSA-OAEP-3072-SHA256 public key (fetched via files-connect-api)
+- * 3. Encrypt chunk i with IV = baseIV + i and AAD "i:totalChunks:fileId",
+- *    then PUT it as multipart part i+1 (one ~16 MB ciphertext in memory at a time)
+- * 4. On complete-upload the fileserver composes the ciphertext parts in part
+- *    order into one object; a manifest sidecar carries everything the TEE
+- *    needs to unwrap the DEK (KMS asymmetricDecrypt) and decrypt chunk-wise.
++ * 1. One upload session (one "Upload all" click) gets one random AES-256-GCM
++ *    key. It is wrapped once with the platform's Cloud KMS RSA-OAEP-3072-SHA256
++ *    public key (fetched via files-connect-api) and stored in the session
++ *    manifest; only the TEE can unwrap it (KMS asymmetricDecrypt).
++ * 2. Every file of the session is encrypted with that key in 16 MB chunks. The
++ *    object starts with a 36-byte header that carries the file's random base
++ *    IV; chunk i uses IV = base IV + i:
+  *
+- * Chunk boundaries in the composed object are pure arithmetic — every chunk's
+- * ciphertext is its plaintext length + 16-byte GCM tag — so no framing bytes
+- * are stored. Ordering is enforced cryptographically by the AAD: decryption
+- * fails if chunks are reordered, substituted, or truncated.
++ *      header  = "TNHE" | version 2 | 3 zero bytes | session id (16) | base IV (12)
++ *      object  = header | chunk 0 ciphertext+tag | chunk 1 ciphertext+tag | ...
++ *      AAD(i)  = header | uint32be(i) | uint32be(totalChunks)
+  *
+- * Same cipher/IV/AAD scheme as the ONNX transfer path (index.ts uploadEncrypted),
+- * but streaming per-part instead of one buffered PUT, and KMS-wrapped instead
+- * of HPKE-wrapped so the ciphertext is decryptable at rest, not just in-session.
++ * 3. After the session's files are uploaded, one manifest is written for the
++ *    whole session (`_tanuh/manifest-<session id>.json`): the wrapped key, the
++ *    chunk size and, per file, its key, base IV, size and chunk count.
++ *
++ * There is no plaintext hash. Each chunk's GCM tag already covers its bytes,
++ * and the AAD binds the header (session, base IV), the chunk index and the
++ * chunk count, so altered, reordered, truncated or moved chunks fail to
++ * decrypt. A chunk moved into another file fails because that file's IVs are
++ * different. The per-file base IV in the manifest lets the TEE tell when an
++ * object was replaced by another file.
++ *
++ * Base IVs are random 96-bit values, so two files of a session sharing an IV
++ * range is vanishingly unlikely (GCM must never reuse a key+IV pair).
++ *
++ * A file uploaded by a later session (added files, a retry after a failure)
++ * gets that session's key and manifest; the header's session id tells the TEE
++ * which manifest to use. Objects whose session never wrote a manifest (tab
++ * closed mid-upload) cannot be decrypted, which marks them as "not finalized".
++ *
++ * Chunk boundaries are pure arithmetic: the TEE gets the chunk count from the
++ * object size, ceil((size - 36) / (chunk_size + 16)).
+  */
+ 
+-import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
+ import { b64encode, b64decode } from './util/base64';
+ 
+ export const DATASET_CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB plaintext per AES-GCM chunk
+ export const GCM_TAG_BYTES = 16;
+-export const ENC_DATASET_SCHEMA = 'tanuh-enc-dataset-v1';
+-export const DEK_WRAP_ALG = 'RSA-OAEP-3072-SHA256';
++export const ENC_DATASET_SCHEMA = 'tanuh-enc-dataset-v2';
++export const KEY_WRAP_ALG = 'RSA-OAEP-3072-SHA256';
++export const DATASET_HEADER_BYTES = 36;
++/** Session manifests live here, at the databank root */
++export const MANIFEST_PREFIX = '_tanuh';
+ 
++const HEADER_MAGIC = [0x54, 0x4e, 0x48, 0x45]; // "TNHE"
++const HEADER_VERSION = 2;
+ const PART_PUT_ATTEMPTS = 3;
+ 
+-/** Sidecar JSON stored as `${key}.manifest.json` — the TEE decryption contract. */
+-export interface EncryptedDatasetManifest {
++/** `_tanuh/manifest-<session id>.json` — the TEE decryption contract for one upload session. */
++export interface EncryptedSessionManifest {
+   schema: typeof ENC_DATASET_SCHEMA;
+-  file_id: string;
++  session_id: string; // UUID, also in every object's header
+   cipher: 'AES-256-GCM';
+-  chunk_size: number;
+-  total_chunks: number;
+-  plaintext_size: number;
+-  plaintext_sha256: string;
+-  base_iv: string; // b64
+-  aad_scheme: 'i:totalChunks:fileId';
+-  wrapped_dek: string; // b64
+-  dek_wrap_alg: typeof DEK_WRAP_ALG;
++  chunk_size: number; // plaintext bytes per chunk
++  header_bytes: number;
++  wrapped_key: string; // b64
++  key_wrap_alg: typeof KEY_WRAP_ALG;
+   kms_key_version: string;
+   created_at: string; // ISO 8601
++  files: {
++    key: string; // object key, relative to the databank
++    base_iv: string; // b64, same bytes as in the object's header
++    plaintext_size: number;
++    total_chunks: number;
++  }[];
++}
++
++/** One upload session: the key every file of the session is encrypted with. */
++export interface EncryptionSession {
++  id: string; // UUID
++  aesKey: CryptoKey; // not extractable
++  wrappedKey: Uint8Array;
++  kmsKeyVersion: string;
++  createdAt: string;
++  /** Files that finished uploading; written to the manifest by sessionManifest() */
++  files: EncryptedSessionManifest['files'];
++}
++
++/** Per-file encryption state: the header (with the base IV) and the chunk count. */
++export interface EncryptedFile {
++  key: string;
++  size: number;
++  totalChunks: number;
++  header: Uint8Array;
++  baseIV: Uint8Array;
+ }
+ 
+ export interface EncryptChunksOptions {
++  session: EncryptionSession;
+   file: File;
+-  /** PEM (SPKI "PUBLIC KEY") from GET /v1/encryption/public-key */
+-  publicKeyPem: string;
+-  /** Full KMS key-version resource name, recorded verbatim in the manifest */
+-  kmsKeyVersion: string;
+-  /** Upload one encrypted chunk (0-based index); caller maps to part number/URL */
+-  putPart: (chunkIndex: number, bytes: Uint8Array) => Promise<void>;
++  encrypted: EncryptedFile;
++  /** Upload one encrypted chunk (0-based index); caller maps to part number/URL. Returns the ETag. */
++  putPart: (chunkIndex: number, bytes: Uint8Array) => Promise<string>;
++  /** Chunks uploading at the same time (the next chunk is encrypted meanwhile). Default 1. */
++  partsInFlight?: number;
+   /** 0–100 across all chunks */
+   onProgress?: (pct: number) => void;
+ }
+ 
+-/** Streaming SHA-256 of a File (peak memory: one 16 MB chunk). */
+-export async function computeFileSha256(
+-  file: File,
+-  onProgress?: (pct: number) => void,
+-): Promise<string> {
+-  const hasher = nobleSha256.create();
+-  let offset = 0;
+-  while (offset < file.size) {
+-    const buf = await file
+-      .slice(offset, offset + DATASET_CHUNK_SIZE)
+-      .arrayBuffer();
+-    hasher.update(new Uint8Array(buf));
+-    offset += DATASET_CHUNK_SIZE;
+-    onProgress?.(Math.min(100, Math.round((offset / file.size) * 100)));
+-  }
+-  const digest = hasher.digest();
+-  return Array.from(digest)
+-    .map((b) => b.toString(16).padStart(2, '0'))
+-    .join('');
+-}
+-
+ /** Parse a PEM SPKI public key and import it for RSA-OAEP-SHA256 wrapping. */
+ export async function importWrappingKey(
+   publicKeyPem: string,
+@@ -99,27 +120,21 @@ export async function importWrappingKey(
+   );
+ }
+ 
+-/** Number of multipart parts an encrypted upload of `fileSize` bytes needs. */
++/** Number of multipart parts (= chunks) an encrypted upload of `fileSize` bytes needs. */
+ export function encryptedPartCount(fileSize: number): number {
+   return Math.max(1, Math.ceil(fileSize / DATASET_CHUNK_SIZE));
+ }
+ 
+-/**
+- * Encrypt the file chunk-by-chunk, handing each ciphertext to `putPart`.
+- * Returns the manifest to upload as `${key}.manifest.json` after the
+- * multipart upload has been completed (composed) successfully.
+- */
+-export async function encryptAndUploadChunks(
+-  opts: EncryptChunksOptions,
+-): Promise<EncryptedDatasetManifest> {
+-  const { file, putPart, onProgress } = opts;
+-  const totalChunks = encryptedPartCount(file.size);
+-  const fileId = crypto.randomUUID();
+-
+-  const sha256hex = await computeFileSha256(file);
+-
+-  // Fresh DEK per file; wrapped copy is the only durable form of the key.
++/** New session: a fresh random key, wrapped once with the KMS public key. */
++export async function createEncryptionSession(
++  publicKeyPem: string,
++  kmsKeyVersion: string,
++): Promise<EncryptionSession> {
+   const rawKey = crypto.getRandomValues(new Uint8Array(32));
++  const wrappingKey = await importWrappingKey(publicKeyPem);
++  const wrappedKey = new Uint8Array(
++    await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, wrappingKey, rawKey),
++  );
+   const aesKey = await crypto.subtle.importKey(
+     'raw',
+     rawKey,
+@@ -127,83 +142,181 @@ export async function encryptAndUploadChunks(
+     false,
+     ['encrypt'],
+   );
+-  const wrappingKey = await importWrappingKey(opts.publicKeyPem);
+-  const wrappedDek = new Uint8Array(
+-    await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, wrappingKey, rawKey),
+-  );
++  // The wrapped copy (and the non-extractable CryptoKey) are the only forms kept.
+   rawKey.fill(0);
++  return {
++    id: crypto.randomUUID(),
++    aesKey,
++    wrappedKey,
++    kmsKeyVersion,
++    createdAt: new Date().toISOString(),
++    files: [],
++  };
++}
+ 
+-  // 12-byte base IV; chunk i uses baseIV + i (96-bit big-endian increment).
++/** Header and chunk count for one file; the base IV is random per file. */
++export function beginEncryptedFile(
++  session: EncryptionSession,
++  key: string,
++  size: number,
++): EncryptedFile {
+   const baseIV = crypto.getRandomValues(new Uint8Array(12));
+-  const iv = new Uint8Array(baseIV);
++  const header = new Uint8Array(DATASET_HEADER_BYTES);
++  header.set(HEADER_MAGIC, 0);
++  header[4] = HEADER_VERSION;
++  header.set(uuidBytes(session.id), 8);
++  header.set(baseIV, 24);
++  return { key, size, totalChunks: encryptedPartCount(size), header, baseIV };
++}
++
++/** Ciphertext + tag of chunk `index`; chunk 0 comes with the header in front. */
++export async function encryptChunk(
++  session: EncryptionSession,
++  file: EncryptedFile,
++  index: number,
++  plaintext: ArrayBuffer,
++): Promise<Uint8Array> {
++  const aad = new Uint8Array(DATASET_HEADER_BYTES + 8);
++  aad.set(file.header, 0);
++  const view = new DataView(aad.buffer);
++  view.setUint32(DATASET_HEADER_BYTES, index);
++  view.setUint32(DATASET_HEADER_BYTES + 4, file.totalChunks);
++  const ct = new Uint8Array(
++    await crypto.subtle.encrypt(
++      {
++        name: 'AES-GCM',
++        iv: ivForChunk(file.baseIV, index),
++        additionalData: aad,
++        tagLength: 128,
++      },
++      session.aesKey,
++      plaintext,
++    ),
++  );
++  if (index !== 0) return ct;
++  const withHeader = new Uint8Array(DATASET_HEADER_BYTES + ct.length);
++  withHeader.set(file.header, 0);
++  withHeader.set(ct, DATASET_HEADER_BYTES);
++  return withHeader;
++}
+ 
+-  for (let i = 0; i < totalChunks; i++) {
++/**
++ * Encrypt the file chunk by chunk and hand each ciphertext to `putPart`.
++ * Up to `partsInFlight` chunks upload at once, and the next chunk is read and
++ * encrypted while they do, so encryption overlaps the network. At most
++ * partsInFlight + 1 chunks (~16 MB each) are in memory. Returns the ETags in
++ * part order.
++ */
++export async function encryptAndUploadChunks(
++  opts: EncryptChunksOptions,
++): Promise<{ partNumber: number; eTag: string }[]> {
++  const { session, file, encrypted, putPart, onProgress } = opts;
++  const maxInFlight = Math.max(1, opts.partsInFlight ?? 1);
++  const etags: { partNumber: number; eTag: string }[] = [];
++  const inFlight = new Set<Promise<void>>();
++  let done = 0;
++
++  for (let i = 0; i < encrypted.totalChunks; i++) {
+     const plaintext = await file
+       .slice(i * DATASET_CHUNK_SIZE, (i + 1) * DATASET_CHUNK_SIZE)
+       .arrayBuffer();
++    const ct = await encryptChunk(session, encrypted, i, plaintext);
+ 
+-    const aad = new TextEncoder().encode(`${i}:${totalChunks}:${fileId}`);
+-
+-    const ct = new Uint8Array(
+-      await crypto.subtle.encrypt(
+-        {
+-          name: 'AES-GCM',
+-          iv: iv.slice(),
+-          additionalData: aad,
+-          tagLength: 128,
+-        },
+-        aesKey,
+-        plaintext,
+-      ),
+-    );
+-
+-    let lastErr: unknown;
+-    for (let attempt = 1; attempt <= PART_PUT_ATTEMPTS; attempt++) {
+-      try {
+-        await putPart(i, ct);
+-        lastErr = undefined;
+-        break;
+-      } catch (err) {
+-        lastErr = err;
+-        if (attempt < PART_PUT_ATTEMPTS) {
+-          await new Promise((r) => setTimeout(r, attempt * 1000));
+-        }
+-      }
+-    }
+-    if (lastErr !== undefined) {
+-      throw new Error(
+-        `chunk ${i + 1}/${totalChunks} upload failed: ${String(lastErr)}`,
+-      );
+-    }
++    // Wait for a free slot; a failed part rejects here and stops the loop.
++    while (inFlight.size >= maxInFlight) await Promise.race(inFlight);
+ 
+-    onProgress?.(Math.round(((i + 1) / totalChunks) * 100));
+-    // increment IV by 1 (big-endian, with carry) for the next chunk.
+-    // NOTE: `++iv[j] !== 0` does NOT work on typed arrays — the ++ expression
+-    // evaluates to the unwrapped 256, so the carry would never propagate.
+-    for (let j = 11; j >= 0; j--) {
+-      iv[j] = (iv[j] + 1) & 0xff;
+-      if (iv[j] !== 0) break;
+-    }
++    const upload: Promise<void> = putPartWithRetry(
++      putPart,
++      i,
++      ct,
++      encrypted.totalChunks,
++    )
++      .then((eTag) => {
++        etags[i] = { partNumber: i + 1, eTag };
++        onProgress?.(Math.round((++done / encrypted.totalChunks) * 100));
++      })
++      .finally(() => inFlight.delete(upload));
++    // The failure is still seen by the race/all above; this only stops an
++    // "unhandled rejection" warning for a part that fails between awaits.
++    upload.catch(() => undefined);
++    inFlight.add(upload);
+   }
++  await Promise.all(inFlight);
++  return etags;
++}
+ 
++/** The session manifest: the wrapped key and every file that finished uploading. */
++export function sessionManifest(
++  session: EncryptionSession,
++): EncryptedSessionManifest {
+   return {
+     schema: ENC_DATASET_SCHEMA,
+-    file_id: fileId,
++    session_id: session.id,
+     cipher: 'AES-256-GCM',
+     chunk_size: DATASET_CHUNK_SIZE,
+-    total_chunks: totalChunks,
+-    plaintext_size: file.size,
+-    plaintext_sha256: sha256hex,
+-    base_iv: b64encode(baseIV),
+-    aad_scheme: 'i:totalChunks:fileId',
+-    wrapped_dek: b64encode(wrappedDek),
+-    dek_wrap_alg: DEK_WRAP_ALG,
+-    kms_key_version: opts.kmsKeyVersion,
+-    created_at: new Date().toISOString(),
++    header_bytes: DATASET_HEADER_BYTES,
++    wrapped_key: b64encode(session.wrappedKey),
++    key_wrap_alg: KEY_WRAP_ALG,
++    kms_key_version: session.kmsKeyVersion,
++    created_at: session.createdAt,
++    files: session.files,
+   };
+ }
+ 
+-/** Object key of the manifest sidecar for a given dataset object key. */
+-export function manifestKeyFor(objectKey: string): string {
+-  return `${objectKey}.manifest.json`;
++/** Record a finished file in the session, for the manifest. */
++export function addFileToSession(
++  session: EncryptionSession,
++  file: EncryptedFile,
++): void {
++  session.files.push({
++    key: file.key,
++    base_iv: b64encode(file.baseIV),
++    plaintext_size: file.size,
++    total_chunks: file.totalChunks,
++  });
++}
++
++/** Object key of a session's manifest, relative to the databank. */
++export function manifestKeyFor(session: EncryptionSession): string {
++  return `${MANIFEST_PREFIX}/manifest-${session.id}.json`;
++}
++
++async function putPartWithRetry(
++  putPart: EncryptChunksOptions['putPart'],
++  index: number,
++  bytes: Uint8Array,
++  totalChunks: number,
++): Promise<string> {
++  let lastErr: unknown;
++  for (let attempt = 1; attempt <= PART_PUT_ATTEMPTS; attempt++) {
++    try {
++      return await putPart(index, bytes);
++    } catch (err) {
++      lastErr = err;
++      if (attempt < PART_PUT_ATTEMPTS)
++        await new Promise((r) => setTimeout(r, attempt * 1000));
++    }
++  }
++  throw new Error(
++    `chunk ${index + 1}/${totalChunks} upload failed: ${String(lastErr)}`,
++  );
++}
++
++/** base IV + index as a 96-bit big-endian integer */
++function ivForChunk(baseIV: Uint8Array, index: number): Uint8Array {
++  const iv = baseIV.slice();
++  let carry = index;
++  for (let j = 11; j >= 0 && carry > 0; j--) {
++    const sum = iv[j] + (carry % 256);
++    iv[j] = sum & 0xff;
++    carry = Math.floor(carry / 256) + (sum >> 8);
++  }
++  return iv;
++}
++
++function uuidBytes(uuid: string): Uint8Array {
++  const hex = uuid.replace(/-/g, '');
++  return Uint8Array.from({ length: 16 }, (_, i) =>
++    parseInt(hex.slice(i * 2, i * 2 + 2), 16),
++  );
+ }
+diff --git a/apps/TANUH/src/lib/index.ts b/apps/TANUH/src/lib/index.ts
+index a915b4e0..76a53109 100644
+--- a/apps/TANUH/src/lib/index.ts
++++ b/apps/TANUH/src/lib/index.ts
+@@ -47,18 +47,25 @@ export type {
+   JobEvaluationAttestation,
+ } from './transfer-onnx';
+ 
+-// Encrypted, chunked dataset upload (client-side envelope encryption, KMS-wrapped DEK)
++// Encrypted, chunked dataset upload (client-side envelope encryption, one KMS-wrapped key per upload session)
+ export {
+-  computeFileSha256,
+   importWrappingKey,
+   encryptedPartCount,
++  createEncryptionSession,
++  beginEncryptedFile,
++  encryptChunk,
+   encryptAndUploadChunks,
++  addFileToSession,
++  sessionManifest,
+   manifestKeyFor,
+   DATASET_CHUNK_SIZE,
++  DATASET_HEADER_BYTES,
+   ENC_DATASET_SCHEMA,
+ } from './encrypted-dataset-upload';
+ export type {
+-  EncryptedDatasetManifest,
++  EncryptedSessionManifest,
++  EncryptionSession,
++  EncryptedFile,
+   EncryptChunksOptions,
+ } from './encrypted-dataset-upload';
+ 
+diff --git a/libs/services/src/lib/controlplane/file-api.service.ts b/libs/services/src/lib/controlplane/file-api.service.ts
+index 6054ba99..ad283a0d 100644
+--- a/libs/services/src/lib/controlplane/file-api.service.ts
++++ b/libs/services/src/lib/controlplane/file-api.service.ts
+@@ -75,6 +75,9 @@ export class FileApiService {
+    * @param key The file key/name
+    * @param contentType The file content type
+    * @param numParts Number of parts for multipart upload
++   * @param options.direct Single presigned PUT straight to the final object, no
++   *   complete call afterwards (numParts must be 1; needs a files-connect-api that
++   *   supports it). The response's `direct: true` tells the caller to skip complete.
+    * @returns Promise with upload initiation response
+    */
+   async initiateUpload(
+@@ -82,6 +85,7 @@ export class FileApiService {
+     key: string,
+     contentType: string,
+     numParts: number,
++    options?: { direct?: boolean },
+   ): Promise<{ data: any; status: number }> {
+     try {
+       // Construct the full URL for databank upload
+@@ -92,6 +96,7 @@ export class FileApiService {
+         key,
+         contentType,
+         numParts,
++        ...(options?.direct ? { direct: true } : {}),
+       };
+ 
+       console.log('Initiating upload:', { url, body });
+@@ -124,6 +129,52 @@ export class FileApiService {
+     }
+   }
+ 
++  /**
++   * Initiate several uploads in one request (POST /databanks/{id}/uploads/batch,
++   * at most 100 per call). Each item takes the same fields as initiateUpload and
++   * gets the same response shape back, in the same order: one round trip instead
++   * of one per file.
++   * @param databankId The databank ID
++   * @param uploads One entry per file
++   * @returns Promise with `data.data.uploads` (or `data.uploads`), one per input item
++   */
++  async initiateUploadsBatch(
++    databankId: string,
++    uploads: Array<{
++      key: string;
++      contentType: string;
++      numParts: number;
++      direct?: boolean;
++    }>,
++  ): Promise<{ data: any; status: number }> {
++    const url = `${this.fileBaseUrl}v1/databanks/${databankId}/uploads/batch`;
++    return new Promise((resolve, reject) => {
++      this.http
++        .post(
++          url,
++          { uploads },
++          {
++            headers: new HttpHeaders({
++              'Content-Type': 'application/json',
++            }),
++            observe: 'response' as const,
++          },
++        )
++        .subscribe({
++          next: (response) => {
++            resolve({
++              data: response.body,
++              status: response.status,
++            });
++          },
++          error: (error) => {
++            console.error('Error initiating batch upload:', error);
++            reject(error);
++          },
++        });
++    });
++  }
++
+   /**
+    * Upload file part to presigned URL
+    * @param presignedUrl The presigned URL for upload

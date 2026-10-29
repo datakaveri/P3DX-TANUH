@@ -1,0 +1,16 @@
+[submodule "TANUH-Processing-TEE"]
+	path = TANUH-Processing-TEE
+	url = https://github.com/datakaveri/TANUH-Processing-TEE.git
+	branch = main
+[submodule "TANUH-Buffer-TEE"]
+	path = TANUH-Buffer-TEE
+	url = https://github.com/datakaveri/TANUH-Buffer-TEE.git
+	branch = main
+[submodule "p3dx-tanuh-processingtee-python"]
+	path = p3dx-tanuh-processingtee-python
+	url = https://github.com/datakaveri/p3dx-tanuh-processingtee-python.git
+	branch = main
+[submodule "p3dx-tanuh-buffertee-python"]
+	path = p3dx-tanuh-buffertee-python
+	url = https://github.com/datakaveri/p3dx-tanuh-buffertee-python.git
+	branch = main
