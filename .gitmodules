@@ -14,3 +14,11 @@
 	path = p3dx-tanuh-buffertee-python
 	url = https://github.com/datakaveri/p3dx-tanuh-buffertee-python.git
 	branch = main
+[submodule "files-connect-api"]
+	path = files-connect-api
+	url = https://github.com/prathmeshj1729/files-connect-api.git
+	branch = feat/faster-dataset-upload
+[submodule "ui-dx"]
+	path = ui-dx
+	url = https://github.com/prathmeshj1729/ui-dx.git
+	branch = feat/faster-dataset-upload

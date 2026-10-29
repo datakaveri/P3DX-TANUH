@@ -21,9 +21,22 @@ The TANUH repositories are linked here as git submodules. Clone with `git clone 
 | [`TANUH-Processing-TEE`](https://github.com/datakaveri/TANUH-Processing-TEE) | Confidential Space workload that decrypts datasets, runs models, adaptors and bucket evaluators, and submits results to the leaderboard |
 | [`p3dx-tanuh-buffertee-python`](https://github.com/datakaveri/p3dx-tanuh-buffertee-python) | Python Buffer TEE |
 | [`p3dx-tanuh-processingtee-python`](https://github.com/datakaveri/p3dx-tanuh-processingtee-python) | Python Processing TEE |
+| [`ui-dx`](https://github.com/prathmeshj1729/ui-dx/tree/feat/faster-dataset-upload) | TANUH web UI, branch `feat/faster-dataset-upload` (see below) |
+| [`files-connect-api`](https://github.com/prathmeshj1729/files-connect-api/tree/feat/faster-dataset-upload) | File server, branch `feat/faster-dataset-upload` (see below) |
 
-## Proposals
+## Faster dataset upload (not merged)
 
-Changes kept for review and future reference, not merged into their repositories:
+`ui-dx` and `files-connect-api` point to the branch `feat/faster-dataset-upload` on forks of [`datakaveri/ui-dx`](https://github.com/datakaveri/ui-dx) (private: needs ui-dx access) and [`datakaveri/files-connect-api`](https://github.com/datakaveri/files-connect-api). These changes are proposed, not merged into either repository:
 
-- [`proposals/faster-dataset-upload`](proposals/faster-dataset-upload): faster dataset upload in `ui-dx` and `files-connect-api` (parallel uploads, batch and direct initiate, session-key encryption with one manifest per upload session).
+- several files upload at once, without a file list refresh after each one;
+- small files are initiated in batches as direct single-PUT uploads (new `POST /databanks/:id/uploads/batch`, `direct` on initiate);
+- encryption uses one key per upload session and one manifest per session, with no plaintext hash; each file starts with a header holding its base IV, incremented per chunk;
+- large files upload 3 encrypted parts at a time;
+- previewing an unknown file type no longer reads the whole object into memory.
+
+To see what changed:
+
+- `ui-dx`: commit [`0f8ade45`](https://github.com/prathmeshj1729/ui-dx/commit/0f8ade45853b7583561da45a7e5f820615e2cea1). The commit before it only runs Prettier on the touched files.
+- `files-connect-api`: [compare with `tanuh-gcp/v2.3`](https://github.com/datakaveri/files-connect-api/compare/tanuh-gcp/v2.3...prathmeshj1729:files-connect-api:feat/faster-dataset-upload).
+
+The Processing TEE does not read the new encrypted format yet, and the UI needs the file-server change deployed first.
