@@ -10,3 +10,33 @@ This Processing TEE is a fully equipped workspace — it even has the uv Python 
 
 Now the real work happens. The Processing TEE pulls in the right evaluator scripts based on the dataset chosen, and the encrypted data it needs is fetched in as well. To unlock that data, the vault fetches an identity token and hands it to a Secrets Manager — a gatekeeper that, once it verifies the token, releases the key needed to open the data. With the model, the scripts, and the data all assembled safely inside the sealed environment, the evaluation runs, and the results are gathered up. Finally, those results are populated onto a leaderboard, where you can filter the rankings across various metrics to see how things stack up. From start to finish, your model stays locked away from prying eyes — encrypted in transit, opened only inside vaults that have proven themselves trustworthy, kept on a leash by an auditable policy, and never exposed to the humans running the machines.
 
+
+## Repositories
+
+The TANUH repositories are linked here as git submodules. Clone with `git clone --recurse-submodules`, or run `git submodule update --init` after cloning.
+
+| Folder | Repository |
+|---|---|
+| [`TANUH-Buffer-TEE`](https://github.com/datakaveri/TANUH-Buffer-TEE) | RA-TLS submission enclave that receives encrypted models and dispatches benchmark jobs to the Processing TEE |
+| [`TANUH-Processing-TEE`](https://github.com/datakaveri/TANUH-Processing-TEE) | Confidential Space workload that decrypts datasets, runs models, adaptors and bucket evaluators, and submits results to the leaderboard |
+| [`p3dx-tanuh-buffertee-python`](https://github.com/datakaveri/p3dx-tanuh-buffertee-python) | Python Buffer TEE |
+| [`p3dx-tanuh-processingtee-python`](https://github.com/datakaveri/p3dx-tanuh-processingtee-python) | Python Processing TEE |
+| [`ui-dx`](https://github.com/prathmeshj1729/ui-dx/tree/feat/faster-dataset-upload) | TANUH web UI, branch `feat/faster-dataset-upload` (see below) |
+| [`files-connect-api`](https://github.com/prathmeshj1729/files-connect-api/tree/feat/faster-dataset-upload) | File server, branch `feat/faster-dataset-upload` (see below) |
+
+## Faster dataset upload (not merged)
+
+`ui-dx` and `files-connect-api` point to the branch `feat/faster-dataset-upload` on forks of [`datakaveri/ui-dx`](https://github.com/datakaveri/ui-dx) (private: needs ui-dx access) and [`datakaveri/files-connect-api`](https://github.com/datakaveri/files-connect-api). These changes are proposed, not merged into either repository:
+
+- several files upload at once, without a file list refresh after each one;
+- small files are initiated in batches as direct single-PUT uploads (new `POST /databanks/:id/uploads/batch`, `direct` on initiate);
+- encryption uses one key per upload session and one manifest per session, with no plaintext hash; each file starts with a header holding its base IV, incremented per chunk;
+- large files upload 3 encrypted parts at a time;
+- previewing an unknown file type no longer reads the whole object into memory.
+
+To see what changed:
+
+- `ui-dx`: commit [`0f8ade45`](https://github.com/prathmeshj1729/ui-dx/commit/0f8ade45853b7583561da45a7e5f820615e2cea1). The commit before it only runs Prettier on the touched files.
+- `files-connect-api`: [compare with `tanuh-gcp/v2.3`](https://github.com/datakaveri/files-connect-api/compare/tanuh-gcp/v2.3...prathmeshj1729:files-connect-api:feat/faster-dataset-upload).
+
+The Processing TEE does not read the new encrypted format yet, and the UI needs the file-server change deployed first.
